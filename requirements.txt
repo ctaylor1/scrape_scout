@@ -1,0 +1,9 @@
+# requirements.txt
+loguru
+pyyaml
+pandas
+openpyxl
+scrapy
+markdownify
+selenium
+requests

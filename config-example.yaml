@@ -1,0 +1,53 @@
+# config.yaml
+
+search_engine_selection: "google"  # or "tavily"
+scrape_articles: "yes"            # "yes" or "no"
+de_duplicate_articles: "on"        # "on" or "off"
+
+search_engines:
+  google:
+    api_name: "google"
+    api_url: "URL"
+    api_key: "KEY"
+    cx: "CX"
+    dateRestrict: "y#"  # Past 5 years. Other examples:
+                    #   "d7"  -> past 7 days
+                    #   "w2"  -> past 2 weeks
+                    #   "m6"  -> past 6 months
+                    #   "y5"  -> past 5 years
+  tavily:
+    api_name: "tavily"
+    api_url: "https://api.tavily.com/v1/search"
+    api_key: "YOUR_TAVILY_API_KEY"
+    additional_param: "SOME_ADDITIONAL_TAVILY_PARAM"
+
+topics:
+  excel_file_name: "topics.xlsx"
+  location: "./data"
+  sheet_name: "Sheet1"
+  column_name: "topic_name"
+
+domains:
+  excel_file_name: "domains.xlsx"
+  location: "./data"
+  sheet_name: "Sheet1"
+  columns:
+    name: "source_name"
+    domain: "source_domain"
+    max_articles: "source_max_articles"
+
+db_storage:
+  path: "./database"
+  name: "article_data.db"
+
+output_excel:
+  path: "./output"
+  file_name: "article_list.xlsx"
+
+output_markdown:
+  path: "./articles"
+
+markdown_settings:
+  short_title_limit: 50
+  # ^ This value controls how many characters of the article title
+  #   to include in the Markdown file name.
