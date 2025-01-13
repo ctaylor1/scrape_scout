@@ -70,48 +70,47 @@ def handle_dynamic_content(url, max_scroll_attempts=3, scroll_pause=2):
             driver.quit()
 
 def scrape_article(url):
-    """Scrapes article content and returns markdown text."""
     logger.debug(f"Scraping article: {url}")
     try:
         response = requests.get(url, timeout=10)
         if response.ok:
-            html_content = response.text
+            return markdownify(response.text)
         else:
             logger.warning("Non-200 response. Attempting dynamic content load.")
-            html_content = handle_dynamic_content(url)
-        return markdownify(html_content)
-    except Exception as e:
+            return markdownify(handle_dynamic_content(url))
+    except Exception as e: 
         logger.exception(f"Error scraping article {url}: {e}")
         return ""
 
-def search_articles(api_config, query, domain, max_articles):
+def search_articles(api_config, query, domain, max_articles, max_qpm):
     """
-    Queries the Google Custom Search API for the specified domain and query.
-    Utilizes 'dateRestrict' if configured, e.g. 'y5' for the past 5 years.
+    Makes a single query to the Google Custom Search API,
+    respecting max_queries_per_minute (QPM).
     """
     logger.debug(f"Searching articles for '{query}' on domain '{domain}' (max: {max_articles})")
 
+    # Throttle (queries per minute)
+    if max_qpm > 0:
+        time.sleep(60.0 / max_qpm)
+
     articles = []
-    # We can skip "site:{domain}" in q since we use siteSearch param below
-    full_query = query
+    params = {
+        "key": api_config.get("api_key"),
+        "cx": api_config.get("cx"),
+        "q": query,
+        "lr": "lang_en",
+        "safe": "off",
+        "siteSearch": domain,
+        "siteSearchFilter": "i"
+    }
+
+    # Optional dateRestrict
+    date_restrict_value = api_config.get("dateRestrict", "").strip()
+    if date_restrict_value:
+        params["dateRestrict"] = date_restrict_value
+        logger.debug(f"Applying dateRestrict: {date_restrict_value}")
 
     try:
-        params = {
-            "key": api_config.get("api_key"),
-            "cx": api_config.get("cx"),
-            "q": full_query,
-            "lr": "lang_en",        # Example: English only
-            "safe": "off",          # Example: SafeSearch off
-            "siteSearch": domain,   # Restrict to this domain
-            "siteSearchFilter": "i" # 'i' -> include domain
-        }
-
-        # If dateRestrict is set, add it to the request
-        date_restrict_value = api_config.get("dateRestrict", "").strip()
-        if date_restrict_value:
-            params["dateRestrict"] = date_restrict_value
-            logger.debug(f"Applying dateRestrict: {date_restrict_value}")
-
         response = requests.get(api_config.get("api_url"), params=params, timeout=10)
         logger.debug(f"Full Request URL: {response.url}")
 
@@ -140,10 +139,15 @@ def main():
     with open("config.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    # Retrieve config
+    # Config variables
     search_engine_selection = config.get("search_engine_selection", "google")
     engines_config = config.get("search_engines", {})
     selected_engine_config = engines_config.get(search_engine_selection, {})
+
+    search_settings = config.get("search_settings", {})
+    max_qpm = search_settings.get("max_queries_per_minute", 100)   # queries per minute
+    max_qpd = search_settings.get("max_queries_per_day", 10000)    # queries per day
+
     scrape_flag = config.get("scrape_articles", "yes")
     deduplicate_flag = config.get("de_duplicate_articles", "off")
 
@@ -157,29 +161,58 @@ def main():
     markdown_out_path = config["output_markdown"]["path"]
 
     topic_config = config.get("topics", {})
+    domains_config = config.get("domains", {})
+
+    # Load topics
     topics_excel = os.path.join(topic_config["location"], topic_config["excel_file_name"])
     topics_df = pd.read_excel(topics_excel, sheet_name=topic_config["sheet_name"])
     topics_list = topics_df[topic_config["column_name"]].dropna().tolist()
 
-    domain_config = config.get("domains", {})
-    domains_excel = os.path.join(domain_config["location"], domain_config["excel_file_name"])
-    domains_df = pd.read_excel(domains_excel, sheet_name=domain_config["sheet_name"])
+    # Load domains
+    domains_excel = os.path.join(domains_config["location"], domains_config["excel_file_name"])
+    domains_df = pd.read_excel(domains_excel, sheet_name=domains_config["sheet_name"])
     domains_records = domains_df.to_dict("records")
 
     all_articles = []
 
-    # 1. Search for each topic/domain
-    for topic in topics_list:
-        for domain_row in domains_records:
-            domain_value = domain_row[domain_config["columns"]["domain"]]
-            max_articles = domain_row[domain_config["columns"]["max_articles"]]
+    # Initialize daily query counter
+    daily_count = 0
 
-            found_articles = search_articles(selected_engine_config, topic, domain_value, max_articles)
+    # Perform searches
+    for topic in topics_list:
+        # If we've already reached daily limit, stop
+        if daily_count >= max_qpd:
+            logger.info("Max daily queries reached. Skipping further topics.")
+            break
+
+        for domain_row in domains_records:
+            if daily_count >= max_qpd:
+                logger.info("Max daily queries reached. Skipping further domains.")
+                break
+
+            domain_value = domain_row[domains_config["columns"]["domain"]]
+            max_articles = domain_row[domains_config["columns"]["max_articles"]]
+
+            # Increment daily_count because each call to search_articles is a new query
+            if daily_count < max_qpd:
+                found_articles = search_articles(
+                    selected_engine_config,
+                    topic,
+                    domain_value,
+                    max_articles,
+                    max_qpm
+                )
+                daily_count += 1
+            else:
+                logger.info("Max daily queries reached mid-process. Skipping.")
+                break
+
             if not found_articles:
                 logger.warning(f"No results for topic='{topic}' domain='{domain_value}'.")
+
             all_articles.extend(found_articles)
 
-    # 2. Deduplicate if needed
+    # Deduplicate if needed
     if deduplicate_flag.lower() == "on":
         unique_urls = set()
         deduped_articles = []
@@ -201,31 +234,26 @@ def main():
                 article["suspected_duplicate"] = "no"
                 seen.add(article["source_url"])
 
-    # 3. Store initial search results in DB & Excel (no article_content yet)
+    # Store search results (no article content yet)
     store_articles_in_db(db_path, db_name, all_articles)
     store_articles_in_excel(excel_out_path, excel_out_file, all_articles)
 
-    # 4. Scrape or Download if scrape_flag is enabled
+    # If scraping is enabled, scrape web pages / download PDFs
     if scrape_flag.lower() == "yes":
         for article in all_articles:
             topic_for_article = article.get("search_query", "general")
             url = article["source_url"].lower()
 
-            # Check if it's a PDF link
             if url.endswith(".pdf"):
-                # Download PDF, skip scraping
                 article["date_retrieved"] = datetime.now().isoformat()
                 store_article_pdf(markdown_out_path, article, topic_for_article, short_title_limit)
             else:
-                # Scrape HTML page -> store Markdown
                 content_md = scrape_article(article["source_url"])
                 article["article_content"] = content_md
                 article["date_retrieved"] = datetime.now().isoformat()
-
-                # Write to markdown
                 store_article_markdown(markdown_out_path, article, topic_for_article, short_title_limit)
 
-        # Update DB & Excel with final date_retrieved (but no article_content stored)
+        # Update DB & Excel with final date_retrieved
         store_articles_in_db(db_path, db_name, all_articles)
         store_articles_in_excel(excel_out_path, excel_out_file, all_articles)
     else:
