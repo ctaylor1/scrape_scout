@@ -156,3 +156,46 @@ def store_article_pdf(base_path, article, topic_name, short_title_limit):
         logger.exception(
             f"Error downloading PDF for article GUID {article.get('source_guid')}: {e}"
         )
+
+def load_articles_from_db(db_path, db_name):
+    """
+    Loads articles previously stored in the local SQLite database.
+    Returns a list of dictionaries, each representing an article's metadata.
+    """
+    db_full_path = os.path.join(db_path, db_name)
+    articles = []
+
+    if not os.path.exists(db_full_path):
+        logger.warning(f"Database not found at {db_full_path}. Returning empty list.")
+        return articles
+
+    try:
+        conn = sqlite3.connect(db_full_path)
+        cursor = conn.cursor()
+        # Pull everything except the content, which we are storing in Markdown/PDF only
+        query = """
+            SELECT 
+                source_guid,
+                source_name,
+                source_domain,
+                search_engine_name,
+                source_url,
+                source_article_title,
+                date_retrieved,
+                search_query,
+                suspected_duplicate
+            FROM articles
+        """
+        rows = cursor.execute(query).fetchall()
+        col_names = [desc[0] for desc in cursor.description]
+        
+        # Convert rows to list of dict
+        for row in rows:
+            record = dict(zip(col_names, row))
+            articles.append(record)
+    except Exception as e:
+        logger.exception(f"Error loading articles from DB: {e}")
+    finally:
+        conn.close()
+
+    return articles

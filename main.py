@@ -148,6 +148,7 @@ def main():
     max_qpm = search_settings.get("max_queries_per_minute", 100)   # queries per minute
     max_qpd = search_settings.get("max_queries_per_day", 10000)    # queries per day
 
+    run_search = config.get("run_search", "yes").lower()  # "yes" or "no"
     scrape_flag = config.get("scrape_articles", "yes")
     deduplicate_flag = config.get("de_duplicate_articles", "off")
 
@@ -160,83 +161,73 @@ def main():
     excel_out_file = config["output_excel"]["file_name"]
     markdown_out_path = config["output_markdown"]["path"]
 
-    topic_config = config.get("topics", {})
-    domains_config = config.get("domains", {})
+    if run_search == "yes":
+        logger.info("Running search logic...")
 
-    # Load topics
-    topics_excel = os.path.join(topic_config["location"], topic_config["excel_file_name"])
-    topics_df = pd.read_excel(topics_excel, sheet_name=topic_config["sheet_name"])
-    topics_list = topics_df[topic_config["column_name"]].dropna().tolist()
+        # Load Topics
+        topic_config = config.get("topics", {})
+        topics_excel = os.path.join(topic_config["location"], topic_config["excel_file_name"])
+        topics_df = pd.read_excel(topics_excel, sheet_name=topic_config["sheet_name"])
+        topics_list = topics_df[topic_config["column_name"]].dropna().tolist()
 
-    # Load domains
-    domains_excel = os.path.join(domains_config["location"], domains_config["excel_file_name"])
-    domains_df = pd.read_excel(domains_excel, sheet_name=domains_config["sheet_name"])
-    domains_records = domains_df.to_dict("records")
+        # Load Domains
+        domain_config = config.get("domains", {})
+        domains_excel = os.path.join(domain_config["location"], domain_config["excel_file_name"])
+        domains_df = pd.read_excel(domains_excel, sheet_name=domain_config["sheet_name"])
+        domains_records = domains_df.to_dict("records")
 
-    all_articles = []
-
-    # Initialize daily query counter
-    daily_count = 0
-
-    # Perform searches
-    for topic in topics_list:
-        # If we've already reached daily limit, stop
-        if daily_count >= max_qpd:
-            logger.info("Max daily queries reached. Skipping further topics.")
-            break
-
-        for domain_row in domains_records:
+        # Perform your daily_count logic if needed
+        daily_count = 0
+        for topic in topics_list:
             if daily_count >= max_qpd:
-                logger.info("Max daily queries reached. Skipping further domains.")
+                logger.info("Max daily queries reached. Stopping early.")
                 break
 
-            domain_value = domain_row[domains_config["columns"]["domain"]]
-            max_articles = domain_row[domains_config["columns"]["max_articles"]]
+            for domain_row in domains_records:
+                if daily_count >= max_qpd:
+                    logger.info("Max daily queries reached in domain loop.")
+                    break
 
-            # Increment daily_count because each call to search_articles is a new query
-            if daily_count < max_qpd:
+                domain_value = domain_row[domain_config["columns"]["domain"]]
+                max_articles = domain_row[domain_config["columns"]["max_articles"]]
+
                 found_articles = search_articles(
-                    selected_engine_config,
+                    # your engine config, e.g. config["search_engines"]["google"]
+                    config["search_engines"][config["search_engine_selection"]],
                     topic,
                     domain_value,
                     max_articles,
                     max_qpm
                 )
                 daily_count += 1
-            else:
-                logger.info("Max daily queries reached mid-process. Skipping.")
-                break
 
-            if not found_articles:
-                logger.warning(f"No results for topic='{topic}' domain='{domain_value}'.")
+                # Deduplicate if needed (local or global)
+                if deduplicate_flag == "on":
+                    # deduplicate logic
+                    unique_urls = set()
+                    deduped_batch = []
+                    for article in found_articles:
+                        if article["source_url"] not in unique_urls:
+                            article["suspected_duplicate"] = "no"
+                            unique_urls.add(article["source_url"])
+                            deduped_batch.append(article)
+                        else:
+                            article["suspected_duplicate"] = "yes"
+                            deduped_batch.append(article)
+                    found_articles = deduped_batch
 
-            all_articles.extend(found_articles)
+                # Immediately store to DB & Excel
+                store_articles_in_db(db_path, db_name, found_articles)
+                store_articles_in_excel(excel_out_path, excel_out_file, found_articles)
 
-    # Deduplicate if needed
-    if deduplicate_flag.lower() == "on":
-        unique_urls = set()
-        deduped_articles = []
-        for article in all_articles:
-            if article["source_url"] not in unique_urls:
-                article["suspected_duplicate"] = "no"
-                unique_urls.add(article["source_url"])
-                deduped_articles.append(article)
-            else:
-                article["suspected_duplicate"] = "yes"
-                deduped_articles.append(article)
-        all_articles = deduped_articles
+                # Keep them in memory for potential scraping
+                all_articles.extend(found_articles)
+
     else:
-        seen = set()
-        for article in all_articles:
-            if article["source_url"] in seen:
-                article["suspected_duplicate"] = "yes"
-            else:
-                article["suspected_duplicate"] = "no"
-                seen.add(article["source_url"])
-
-    # Store search results (no article content yet)
-    store_articles_in_db(db_path, db_name, all_articles)
-    store_articles_in_excel(excel_out_path, excel_out_file, all_articles)
+        logger.info("Skipping search logic. Loading existing articles from DB.")
+        all_articles = load_articles_from_db(db_path, db_name)  
+        # or load_articles_from_excel(excel_out_path, excel_out_file)
+        # if you prefer Excel as your source
 
     # If scraping is enabled, scrape web pages / download PDFs
     if scrape_flag.lower() == "yes":
